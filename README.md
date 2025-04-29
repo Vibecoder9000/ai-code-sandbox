@@ -158,12 +158,12 @@ Execute Python code in the sandbox.
 - `code`: String containing Python code to execute.
 - `env_vars` (optional): Dictionary of environment variables to set for the execution.
 
-### `sandbox.write_file(content, filename)`
+### `sandbox.write_file(filename, content)`
 
 Write content to a file in the sandbox.
 
-- `content`: String content to write to the file.
 - `filename`: Name of the file to create or overwrite.
+- `content`: String content to write to the file.
 
 ### `sandbox.read_file(filename)`
 
