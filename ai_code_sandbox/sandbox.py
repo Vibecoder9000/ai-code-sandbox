@@ -7,6 +7,7 @@ import tarfile
 import io
 from io import BytesIO
 import time
+import sys
 
 class AICodeSandbox:
     """
@@ -22,43 +23,67 @@ class AICodeSandbox:
         temp_image (docker.models.images.Image): Temporary Docker image created for the sandbox.
     """
 
-    def __init__(self, custom_image=None, packages=None, network_mode="none", mem_limit="100m", cpu_period=100000, cpu_quota=50000):
+    def __init__(self, custom_image=None, packages=None, network_mode="bridge", mem_limit="512m", cpu_period=100000, cpu_quota=50000):
         """
         Initialize the PythonSandbox.
 
         Args:
             custom_image (str, optional): Name of a custom Docker image to use. Defaults to None.
             packages (list, optional): List of Python packages to install in the sandbox. Defaults to None.
-            network_mode (str, optional): Network mode to use for the sandbox. Defaults to "none".
-            mem_limit (str, optional): Memory limit for the sandbox. Defaults to "100m".
+            network_mode (str, optional): Network mode to use for the sandbox. Defaults to "bridge".
+            mem_limit (str, optional): Memory limit for the sandbox. Defaults to "512m".
             cpu_period (int, optional): CPU period for the sandbox. Defaults to 100000.
             cpu_quota (int, optional): CPU quota for the sandbox. Defaults to 50000.
         """
         self.client = docker.from_env()
         self.container = None
         self.temp_image = None
+        self.pool = None
         self._setup_sandbox(custom_image, packages, network_mode, mem_limit, cpu_period, cpu_quota)
 
     def _setup_sandbox(self, custom_image, packages, network_mode, mem_limit, cpu_period, cpu_quota):
         """Set up the sandbox environment."""
+        # Default packages for persistent container
+        default_packages = [
+            "requests", "numpy", "pandas", "matplotlib", "scipy", 
+            "beautifulsoup4", "fastapi", "pillow", "opencv-python", "regex"
+        ]
+        
+        # If using default setup (no custom image, no packages specified), try persistent container
+        if custom_image is None and packages is None:
+            try:
+                self.container = self.client.containers.get("sandbox_persistent")
+                return  # Reuse existing persistent container
+            except Exception:
+                pass  # Container doesn't exist, will create new one below
+            
+            # First time setup: create persistent container with default packages
+            packages = default_packages
+        
         image_name = custom_image or "python:3.9-slim"
         
+        # Build custom image if packages are provided
         if packages:
             dockerfile = f"FROM {image_name}\nRUN pip install {' '.join(packages)}"
             dockerfile_obj = BytesIO(dockerfile.encode('utf-8'))
             self.temp_image = self.client.images.build(fileobj=dockerfile_obj, rm=True)[0]
             image_name = self.temp_image.id
 
+        # Create new container
+        is_default_setup = custom_image is None and packages is not None and set(packages) == set(default_packages)
+        container_name = "sandbox_persistent" if is_default_setup else f"python_sandbox_{uuid.uuid4().hex[:8]}"
         self.container = self.client.containers.run(
             image_name,
-            name=f"python_sandbox_{uuid.uuid4().hex[:8]}",
+            name=container_name,
             command="tail -f /dev/null",
             detach=True,
             network_mode=network_mode,
+            dns=["8.8.8.8", "8.8.4.4"],  # Google DNS for internet access
             mem_limit=mem_limit,
             cpu_period=cpu_period,
             cpu_quota=cpu_quota
         )
+
 
     def write_file(self, filename, content):
         """
@@ -134,25 +159,78 @@ class AICodeSandbox:
         
         code = textwrap.dedent(code)
 
+        code_preview = code.strip()
+        if len(code_preview) > 200:
+            code_preview = code_preview[:197] + '...'
+        print(
+            f"[SANDBOX] Executing code (len={len(code)}): {code_preview}",
+            file=sys.stderr,
+            flush=True,
+        )
+
         env_str = " ".join(f"{k}={shlex.quote(v)}" for k, v in env_vars.items())
         escaped_code = code.replace("'", "'\"'\"'")
         exec_command = f"env {env_str} python -c '{escaped_code}'"
         
+        t_exec_start = time.time()
         exec_result = self.container.exec_run(
             ["sh", "-c", exec_command],
             demux=True
         )
-        
-        if exec_result.exit_code != 0:
-            return f"Error (exit code {exec_result.exit_code}): {exec_result.output[1].decode('utf-8')}"
+        t_exec_end = time.time()
+        print(
+            f"[SANDBOX] container.exec_run() took {(t_exec_end - t_exec_start)*1000:.2f}ms",
+            file=sys.stderr,
+            flush=True,
+        )
         
         stdout, stderr = exec_result.output
-        if stdout is not None:
-            return stdout.decode('utf-8')
-        elif stderr is not None:
-            return f"Error: {stderr.decode('utf-8')}"
-        else:
-            return "No output"
+
+        stdout_text = stdout.decode('utf-8') if stdout else ''
+        stderr_text = stderr.decode('utf-8') if stderr else ''
+
+        print(
+            f"[SANDBOX] exit_code={exec_result.exit_code} stdout_len={len(stdout_text)} stderr_len={len(stderr_text)}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+        if exec_result.exit_code != 0:
+            error_preview = stderr_text.strip() or stdout_text.strip()
+            if len(error_preview) > 200:
+                error_preview = error_preview[:197] + '...'
+            print(
+                f"[SANDBOX] execution failed: {error_preview}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return f"Error (exit code {exec_result.exit_code}): {stderr_text}"
+
+        if stdout_text:
+            preview = stdout_text.strip()
+            if len(preview) > 200:
+                preview = preview[:197] + '...'
+            print(
+                f"[SANDBOX] stdout preview: {preview}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        if stderr_text:
+            preview = stderr_text.strip()
+            if len(preview) > 200:
+                preview = preview[:197] + '...'
+            print(
+                f"[SANDBOX] stderr preview: {preview}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        if stdout_text:
+            return stdout_text
+        if stderr_text:
+            return f"Error: {stderr_text}"
+        return "No output"
 
     def close(self):
         """
@@ -161,15 +239,14 @@ class AICodeSandbox:
         This method should be called when the sandbox is no longer needed to clean up Docker resources.
         """
         if self.container:
-            try:
-                self.container.stop(timeout=10)
-                self.container.remove(force=True)
-            except Exception as e:
-                print(f"Error stopping/removing container: {str(e)}")
-            finally:
-                self.container = None
-
-        time.sleep(2)
+            # Never stop or remove the persistent container
+            if self.container.name != "sandbox_persistent":
+                try:
+                    self.container.stop(timeout=10)
+                    self.container.remove(force=True)
+                except Exception as e:
+                    print(f"Error stopping/removing container: {str(e)}")
+            self.container = None
 
         if self.temp_image:
             try:
