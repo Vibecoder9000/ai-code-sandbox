@@ -19,11 +19,17 @@ def execute_bash(code):
             shell=True,
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=30,
+            preexec_fn=None  # Windows compatibility
         )
         return result.stdout, result.stderr, result.returncode
-    except subprocess.TimeoutExpired:
-        return "", "Bash execution timed out (30s)", 124
+    except subprocess.TimeoutExpired as e:
+        # Ensure process is killed on timeout
+        if e.stdout:
+            stdout = e.stdout if isinstance(e.stdout, str) else e.stdout.decode('utf-8', errors='ignore')
+        else:
+            stdout = ""
+        return stdout, "Bash execution timed out (30s)", 124
     except Exception as e:
         return "", str(e), 1
 
