@@ -53,9 +53,30 @@ class AICodeSandbox:
         if custom_image is None and packages is None:
             try:
                 self.container = self.client.containers.get("sandbox_persistent")
+                # Check if container is running, start it if not
+                self.container.reload()
+                if self.container.status != 'running':
+                    print(f"[SANDBOX] Container sandbox_persistent is {self.container.status}, starting it...", file=sys.stderr, flush=True)
+                    self.container.start()
+                    # Wait for container to be fully running
+                    for _ in range(10):
+                        self.container.reload()
+                        if self.container.status == 'running':
+                            break
+                        time.sleep(0.5)
+                    if self.container.status != 'running':
+                        raise Exception(f"Failed to start container, status: {self.container.status}")
                 return  # Reuse existing persistent container
-            except Exception:
+            except docker.errors.NotFound:
                 pass  # Container doesn't exist, will create new one below
+            except Exception as e:
+                print(f"[SANDBOX] Error with persistent container: {e}, recreating...", file=sys.stderr, flush=True)
+                # Try to remove broken container
+                try:
+                    old = self.client.containers.get("sandbox_persistent")
+                    old.remove(force=True)
+                except:
+                    pass
             
             # First time setup: create persistent container with default packages
             packages = default_packages
